@@ -1,10 +1,12 @@
 package timeusage
 
+import java.nio.file.Paths
+
 import org.apache.spark.sql._
 import org.apache.spark.sql.types._
 
 /** Main class */
-object TimeUsage extends TimeUsageInterface {
+object TimeUsage {
 
   import org.apache.spark.sql.SparkSession
   import org.apache.spark.sql.functions._
@@ -13,7 +15,7 @@ object TimeUsage extends TimeUsageInterface {
     SparkSession
       .builder()
       .appName("Time Usage")
-      .master("local")
+      .config("spark.master", "local")
       .getOrCreate()
 
   // For implicit conversions like converting RDDs to DataFrames
@@ -21,12 +23,17 @@ object TimeUsage extends TimeUsageInterface {
 
   /** Main function */
   def main(args: Array[String]): Unit = {
-    timeUsageByLifePeriod()
-    spark.close()
+    try {
+      timeUsageByLifePeriod()
+    } catch {
+      case t: Throwable => println(t)
+    } finally {
+      spark.stop()
+    }
   }
 
   def timeUsageByLifePeriod(): Unit = {
-    val (columns, initDf) = read("src/main/resources/timeusage/atussum.csv")
+    val (columns, initDf) = read("/timeusage/atussum.csv")
     val (primaryNeedsColumns, workColumns, otherColumns) = classifiedColumns(columns)
     val summaryDf = timeUsageSummary(primaryNeedsColumns, workColumns, otherColumns, initDf)
     val finalDf = timeUsageGrouped(summaryDf)
@@ -34,10 +41,38 @@ object TimeUsage extends TimeUsageInterface {
   }
 
   /** @return The read DataFrame along with its column names. */
-  def read(path: String): (List[String], DataFrame) = {
-    val df = spark.read.options(Map("header" -> "true", "inferSchema" -> "true")).csv(path)
-    (df.schema.fields.map(_.name).toList, df)
+  def read(resource: String): (List[String], DataFrame) = {
+    val rdd = spark.sparkContext.textFile(fsPath(resource))
+
+    val headerColumns = rdd.first().split(",").to[List]
+    // Compute the schema based on the first line of the CSV file
+    val schema = dfSchema(headerColumns)
+
+    val data =
+      rdd
+        .mapPartitionsWithIndex((i, it) => if (i == 0) it.drop(1) else it) // skip the header line
+        .map(_.split(",").to[List])
+        .map(row)
+
+    val dataFrame =
+      spark.createDataFrame(data, schema)
+
+    (headerColumns, dataFrame)
   }
+
+  /** @return The filesystem path of the given resource */
+  def fsPath(resource: String): String =
+    Paths.get(getClass.getResource(resource).toURI).toString
+
+  /** @return The schema of the DataFrame, assuming that the first given column has type String and all the others
+    *         have type Double. None of the fields are nullable.
+    * @param columnNames Column names of the DataFrame
+    */
+  def dfSchema(columnNames: List[String]): StructType =
+    StructType(
+      StructField(columnNames.head, StringType, false) ::
+        columnNames.tail.map(elem => StructField(elem, DoubleType, false))
+    )
 
   /** @return An RDD Row compatible with the schema produced by `dfSchema`
     * @param line Raw fields
@@ -201,3 +236,4 @@ case class TimeUsageRow(
   work: Double,
   other: Double
 )
+
